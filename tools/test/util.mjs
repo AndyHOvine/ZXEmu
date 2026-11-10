@@ -112,3 +112,65 @@ export function makeChecker() {
     },
   };
 }
+
+// ---- small BASIC programs for tests, tokenised as the ROM stores them
+const TOKENS = {
+  'RANDOMIZE': 0xf9, 'GO TO': 0xec, 'GO SUB': 0xed, 'INKEY$': 0xa6, 'PRINT': 0xf5, 'BORDER': 0xe7, 'RETURN': 0xfe,
+  'PAUSE': 0xf2, 'POKE': 0xf4, 'PEEK': 0xbe, 'CODE': 0xaf, 'SAVE': 0xf8, 'LOAD': 0xef, 'LINE': 0xca, 'BEEP': 0xd7,
+  'NEXT': 0xf3, 'STOP': 0xe2, 'USR': 0xc0, 'LET': 0xf1, 'FOR': 0xeb, 'OUT': 0xdf, 'CLS': 0xfb, 'REM': 0xea, 'RUN': 0xf7,
+  'AT': 0xac, 'IN': 0xbf, 'TO': 0xcc, 'IF': 0xfa, 'THEN': 0xcb,
+};
+const KEYWORDS = Object.keys(TOKENS).sort((a, b) => b.length - a.length);
+
+export function tokenise(text) {
+  const out = [];
+  let i = 0, quoted = false;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '"') { quoted = !quoted; out.push(0x22); i++; continue; }
+    if (!quoted) {
+      const kw = KEYWORDS.find((k) => text.startsWith(k, i) && !/[A-Z$]/.test(text[i + k.length] || ' ') && !/[A-Z]/.test(text[i - 1] || ' '));
+      if (kw) { out.push(TOKENS[kw]); i += kw.length; while (text[i] === ' ') i++; continue; }
+      const num = /^\d+/.exec(text.slice(i));
+      if (num && !/[A-Z]/.test(text[i - 1] || ' ')) {
+        const n = Number(num[0]);
+        for (const c of num[0]) out.push(c.charCodeAt(0));
+        out.push(0x0e, 0, 0, n & 0xff, (n >> 8) & 0xff, 0);
+        i += num[0].length;
+        continue;
+      }
+    }
+    out.push(ch.charCodeAt(0));
+    i++;
+  }
+  return out;
+}
+
+// a program as BASIC bytes: lines [[number, text], ...]
+export function basicProgram(lines) {
+  const out = [];
+  for (const [n, text] of lines) {
+    const body = [...tokenise(text), 0x0d];
+    out.push(n >> 8, n & 0xff, body.length & 0xff, body.length >> 8, ...body);
+  }
+  return out;
+}
+
+export function tapBlock(bytes) {
+  let p = 0;
+  for (const b of bytes) p ^= b;
+  const all = [...bytes, p];
+  return [all.length & 0xff, all.length >> 8, ...all];
+}
+
+function header(type, name, len, p1, p2) {
+  return [0, type, ...[...name.padEnd(10).slice(0, 10)].map((c) => c.charCodeAt(0)), len & 0xff, len >> 8, p1 & 0xff, p1 >> 8, p2 & 0xff, p2 >> 8];
+}
+
+// a .tap of a BASIC program that runs from `line`, then any CODE blocks [{ name, at, bytes }]
+export function basicTap(lines, { line = 10, name = 'test', code = [] } = {}) {
+  const prog = basicProgram(lines);
+  const out = [...tapBlock(header(0, name, prog.length, line, prog.length)), ...tapBlock([0xff, ...prog])];
+  for (const c of code) out.push(...tapBlock(header(3, c.name, c.bytes.length, c.at, 0x8000)), ...tapBlock([0xff, ...c.bytes]));
+  return new Uint8Array(out);
+}

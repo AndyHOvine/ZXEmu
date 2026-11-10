@@ -460,6 +460,9 @@ export class Spectrum {
     this.typeQueue = [];
     this.typeHold = this.typeGap = 0;
     this.lastTyped = [];
+    this.typeInts = 0;
+    this.gapFrames = 0;
+    this.waitTaken = 0;
     this.typedMatrix.fill(0);
     this.readyHandlers = [];
     this.ready = false;
@@ -574,28 +577,43 @@ export class Spectrum {
     this.typeQueue.push(frames);
   }
 
+  // Typing: each key is held until the ROM has scanned the keyboard twice with it down (its
+  // interrupt), then let go until it has seen it up: once for another key, five times for the
+  // same key again (the ROM's key memory), 25 after ENTER while the editor takes the line in.
+  // A program with interrupts off gets a frame for each instead.
   serviceTyping() {
     if (!this.ready) return;
+    const ints = this.cpu.ints;
     if (this.typeHold > 0) {
-      if (--this.typeHold === 0) {
-        this.typedMatrix.fill(0);
-        // the ROM takes a key as let go only after 5 frames without it: the same key again
-        // waits that long
-        const next = this.typeQueue[0];
-        this.typeGap = Array.isArray(next) && next.some((k) => this.lastTyped.includes(k)) ? 6 : 1;
-      }
+      this.typeHold++;
+      if (ints - this.typeInts < 2 && this.typeHold < 40) return;
+      this.typeHold = 0;
+      this.typedMatrix.fill(0);
+      const next = this.typeQueue[0];
+      if (this.lastTyped.length === 1 && this.lastTyped[0] === 'ENTER') this.typeGap = 25;
+      else this.typeGap = Array.isArray(next) && next.some((k) => this.lastTyped.includes(k)) ? 6 : 1;
+      this.typeInts = ints;
+      this.gapFrames = 0;
       return;
     }
-    if (this.typeGap > 0) { this.typeGap--; return; }
+    if (this.typeGap > 0) {
+      if (ints - this.typeInts < this.typeGap && ++this.gapFrames < this.typeGap + 10) return;
+      this.typeGap = 0;
+    }
+    if (!this.typeQueue.length) return;
+    // while the ROM's editor runs (IY at its system variables, IM 1), the key before must have
+    // been taken (FLAGS bit 5 clear) before the next is pressed
+    if (this.cpu.iy === 0x5c3a && this.cpu.im === 1 && this.pageBank[0] < 0 && (this.peek(0x5c3b) & 0x20) && ++this.waitTaken < 50) return;
+    this.waitTaken = 0;
     const next = this.typeQueue.shift();
-    if (next === undefined) return;
-    if (typeof next === 'number') { this.typeGap = next; return; }
+    if (typeof next === 'number') { this.typeGap = next; this.typeInts = ints; this.gapFrames = 0; return; }
     this.lastTyped = next;
     for (const k of next) {
       const code = ZX_KEYS[k];
       this.typedMatrix[code >> 3] |= 1 << (code & 7);
     }
-    this.typeHold = 3;
+    this.typeHold = 1;
+    this.typeInts = ints;
   }
 
   get typing() { return this.typeQueue.length > 0 || this.typeHold > 0; }

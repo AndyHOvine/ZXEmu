@@ -206,6 +206,11 @@ export function saveZ80(m) {
   h[34] = hw;
   h[35] = m.port7ffd;
   h[37] = m.model === '16k' ? 0x80 | 4 : 4;
+  // where in the frame it is: a quarter-frame count and the T-states left in the quarter
+  const quarter = m.frameLen / 4, t = Math.max(0, Math.min(m.frameLen - 1, c.t));
+  const low = quarter - (t % quarter) - 1;
+  h[55] = low & 0xff; h[56] = (low >> 8) & 0xff;
+  h[57] = (Math.floor(t / quarter) + 3) % 4;
   h[38] = m.psg.select;
   h.set(m.psg.regs, 39);
   const parts = [h];

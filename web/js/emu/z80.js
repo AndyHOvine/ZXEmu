@@ -37,6 +37,7 @@ export class Z80 {
     this.frameLen = 69888;
     this.intLen = 32; // T-states the /INT line is held at the start of a frame (0: never)
     this.t = 0; // T-states into the frame
+    this.ints = 0; // interrupts taken (typing waits for the ROM to have seen keys)
     this.reset();
   }
 
@@ -218,6 +219,7 @@ export class Z80 {
     if (this.ldair) this.f &= ~PF;
     this.iff1 = this.iff2 = 0;
     this.incR();
+    this.ints++;
     this.t += 7;
     this.push(this.pc);
     if (this.im === 2) {
