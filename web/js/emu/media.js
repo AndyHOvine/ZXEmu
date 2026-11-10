@@ -1,3 +1,8 @@
+// What a file is, for ZXEmu. GPL v2 or later, see LICENSE.
+
+import { isTapeFile, isTap } from './tape.js';
+import { isSna, isZ80 } from './snapshot.js';
+
 function ext(name) {
   const m = /\.([a-z0-9]+)$/i.exec(name || '');
   return m ? m[1].toLowerCase() : '';
@@ -12,67 +17,44 @@ export function isDsk(bytes) {
   return s === 'MV - CPC' || s === 'EXTENDED';
 }
 
-export function isTape(bytes) {
-  return ascii(bytes, 0, 7) === 'ZXTape!' ||
-    ascii(bytes, 0, 19) === 'Creative Voice File' ||
-    ascii(bytes, 0, 22) === 'Compressed Square Wave' ||
-    (ascii(bytes, 0, 4) === 'RIFF' && ascii(bytes, 8, 4) === 'WAVE');
-}
-
-export function isSna(bytes) {
-  return ascii(bytes, 0, 8) === 'MV - SNA';
-}
-
-export function isCpr(bytes) {
-  return ascii(bytes, 0, 4) === 'RIFF' && ascii(bytes, 8, 4) === 'AMS!';
-}
-
-export function amsdosHeader(d) {
-  if (d.length < 128) return false;
-  let sum = 0;
-  for (let i = 0; i < 67; i++) sum += d[i];
-  return sum !== 0 && (sum & 0xFFFF) === (d[67] | (d[68] << 8));
-}
-
 export function isZip(bytes) {
-  return bytes[0] === 0x50 && bytes[1] === 0x4B && bytes[2] === 0x03 && bytes[3] === 0x04;
+  return bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
 }
 
+// tape, snapshot, disk, cart (Interface 2), bin (bytes to put in memory), or null
 export function detectType(name, bytes) {
   const e = ext(name);
   if (isZip(bytes)) return 'zip';
   if (isDsk(bytes)) return 'disk';
-  if (isSna(bytes)) return 'snapshot';
-  if (isCpr(bytes)) return 'cart';
-  if (isTape(bytes)) return 'tape';
-  if (amsdosHeader(bytes)) return 'bin';
-  if (e === 'bin') return 'bin';
+  if (isTapeFile(bytes)) return 'tape';
+  if (e === 'tap' || (e !== 'bin' && e !== 'rom' && e !== 'scr' && isTap(bytes))) return 'tape';
+  if (e === 'sna' || e === 'z80' || isSna(bytes) || isZ80(bytes, name)) return 'snapshot';
+  if (e === 'rom' && bytes.length <= 0x4000) return 'cart';
+  if (e === 'bin' || e === 'scr' || e === 'code') return 'bin';
   return null;
 }
 
-export function parseBinary(bytes, load, exec) {
-  if (amsdosHeader(bytes)) {
-    const w = (o) => bytes[o] | (bytes[o + 1] << 8);
-    const len = w(0x40) | (bytes[0x42] << 16);
-    const data = bytes.subarray(128, 128 + (len || w(0x18)));
-    return { type: bytes[0x12] & 0x0E ? 2 : bytes[0x12] & 1, load: load ?? w(0x15), exec: exec ?? w(0x1A), data };
+// a binary: bytes put at `load` and run from `exec` (a .scr goes on the screen, not run)
+export function parseBinary(bytes, load, exec, name = '') {
+  if (ext(name) === 'scr' && bytes.length === 6912 && (load === undefined || load === null)) {
+    return { load: 0x4000, exec: null, data: bytes };
   }
-  if (load === undefined || load === null) throw new Error('A binary without an AMSDOS header needs a load address');
-  return { type: 2, load, exec: exec ?? load, data: bytes };
+  if (load === undefined || load === null) throw new Error('A binary needs a load address (load=&8000)');
+  return { load, exec: exec ?? load, data: bytes };
 }
 
 export async function unzip(bytes) {
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let eocd = -1;
   for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 65557); i--) {
-    if (dv.getUint32(i, true) === 0x06054B50) { eocd = i; break; }
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
   }
   if (eocd < 0) throw new Error('Invalid ZIP file');
   const count = dv.getUint16(eocd + 10, true);
   let p = dv.getUint32(eocd + 16, true);
   const files = [];
   for (let i = 0; i < count; i++) {
-    if (dv.getUint32(p, true) !== 0x02014B50) break;
+    if (dv.getUint32(p, true) !== 0x02014b50) break;
     const method = dv.getUint16(p + 10, true);
     const crc = dv.getUint32(p + 16, true);
     const csize = dv.getUint32(p + 20, true);
@@ -99,17 +81,18 @@ export async function unzip(bytes) {
 
 async function inflate(raw, crc, size) {
   const gz = new Uint8Array(raw.length + 18);
-  gz.set([0x1F, 0x8B, 8, 0, 0, 0, 0, 0, 0, 0xFF]);
+  gz.set([0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff]);
   gz.set(raw, 10);
   const t = raw.length + 10;
   for (let i = 0; i < 4; i++) {
-    gz[t + i] = (crc >>> (8 * i)) & 0xFF;
-    gz[t + 4 + i] = (size >>> (8 * i)) & 0xFF;
+    gz[t + i] = (crc >>> (8 * i)) & 0xff;
+    gz[t + 4 + i] = (size >>> (8 * i)) & 0xff;
   }
   const stream = new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip'));
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
+// a CSW version 2 file packed with Z-RLE: unpacked to RLE (version 1 data) for the tape
 async function cswToRle(bytes) {
   if (ascii(bytes, 0, 22) !== 'Compressed Square Wave' || bytes[0x17] !== 2 || bytes[0x21] !== 2) return bytes;
   const start = 0x34 + bytes[0x23];
@@ -126,6 +109,7 @@ async function item(name, type, data) {
   return { name, type, data: type === 'tape' ? await cswToRle(data) : data };
 }
 
+// the files in a file (a ZIP's, or itself), with their types
 export async function expand(name, bytes) {
   const type = detectType(name, bytes);
   if (type !== 'zip') return type ? [await item(name, type, bytes)] : [];

@@ -374,6 +374,7 @@ export class Tape {
     this.flip = false; // the level flips at edgeAt
     this.phase = 'other';
     this.stack = [];
+    this.after = 0;
     this.atEnd = this.blocks.length === 0;
   }
 
@@ -411,6 +412,13 @@ export class Tape {
 
   // the next event of the tape, starting at T-state `now`
   next(now, onEdge) {
+    if (this.after > 0) {
+      // the rest of a pause after its first millisecond
+      this.flip = false;
+      this.edgeAt = now + this.after * this.scale;
+      this.after = 0;
+      return;
+    }
     for (;;) {
       if (!this.gen) {
         if (this.index >= this.blocks.length) {
@@ -458,6 +466,13 @@ export class Tape {
         return;
       }
       if (v.pause !== undefined) {
+        // a high level is held a millisecond first, so the last edge is seen, then low
+        if (this.level && v.pause > MS) {
+          this.flip = true;
+          this.edgeAt = now + MS * this.scale;
+          this.after = v.pause - MS;
+          return;
+        }
         if (this.level) { this.level = 0; onEdge(now, 0); }
         this.flip = false;
         this.edgeAt = now + v.pause * this.scale;
@@ -513,6 +528,7 @@ export class Tape {
     this.level = 0;
     this.edgeAt = now;
     this.phase = 'other';
+    this.after = 0;
     this.atEnd = index >= this.blocks.length;
   }
 

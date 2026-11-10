@@ -459,6 +459,7 @@ export class Spectrum {
     cpu.onTrap = (pc) => this.onTrapAt(pc);
     this.typeQueue = [];
     this.typeHold = this.typeGap = 0;
+    this.lastTyped = [];
     this.typedMatrix.fill(0);
     this.readyHandlers = [];
     this.ready = false;
@@ -578,7 +579,10 @@ export class Spectrum {
     if (this.typeHold > 0) {
       if (--this.typeHold === 0) {
         this.typedMatrix.fill(0);
-        this.typeGap = 2;
+        // the ROM takes a key as let go only after 5 frames without it: the same key again
+        // waits that long
+        const next = this.typeQueue[0];
+        this.typeGap = Array.isArray(next) && next.some((k) => this.lastTyped.includes(k)) ? 6 : 1;
       }
       return;
     }
@@ -586,6 +590,7 @@ export class Spectrum {
     const next = this.typeQueue.shift();
     if (next === undefined) return;
     if (typeof next === 'number') { this.typeGap = next; return; }
+    this.lastTyped = next;
     for (const k of next) {
       const code = ZX_KEYS[k];
       this.typedMatrix[code >> 3] |= 1 << (code & 7);
