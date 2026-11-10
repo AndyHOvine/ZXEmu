@@ -1,0 +1,15 @@
+{
+  "name": "zxemu",
+  "version": "0.1.0",
+  "description": "ZX Spectrum emulator for the web browser",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node tools/serve.mjs",
+    "build": "node tools/build.mjs",
+    "test": "node tools/test/run-all.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
