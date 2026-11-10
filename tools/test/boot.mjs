@@ -136,4 +136,21 @@ for (const model of ['16k', '48k', '128k', 'plus2', 'plus2a', 'plus3']) {
   shows(m, '');
 }
 
+// the CPU stepped on its own, past the ends of frames (as a debugger and timing tests do):
+// it keeps counting, and the frames carry on with their interrupts afterwards
+for (const model of ['48k', '128k', 'plus3']) {
+  const m = makeMachine({ model });
+  program(m);
+  for (let i = 0; i < 300; i++) m.runFrame();
+  const c0 = m.cycles, n0 = m.peek(0x9001);
+  for (let i = 0; i < 100000; i++) m.cpu.step();
+  const c1 = m.cycles;
+  check(`${model}: stepping keeps counting T-states`, Number.isFinite(c1) && c1 > c0 + 100000, `${c0} ${c1}`);
+  check(`${model}: interrupts come while stepping`, ((m.peek(0x9001) - n0) & 0xff) === Math.floor(c1 / m.frameLen) - Math.floor(c0 / m.frameLen) || ((m.peek(0x9001) - n0) & 0xff) > 0,
+    `${(m.peek(0x9001) - n0) & 0xff}`);
+  const before = m.peek(0x9001);
+  for (let i = 0; i < 10; i++) m.runFrame();
+  check(`${model}: frames carry on after stepping`, ((m.peek(0x9001) - before) & 0xff) >= 9 && m.cpu.t < m.frameLen + 100, `${(m.peek(0x9001) - before) & 0xff} ${m.cpu.t}`);
+}
+
 done();

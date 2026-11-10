@@ -486,6 +486,8 @@ export class Spectrum {
   runFrame() {
     this.serviceTyping();
     const cpu = this.cpu, v = this.video, len = this.frameLen;
+    // the CPU stepped on its own past the end of frames (a debugger, a test): finish them
+    while (cpu.t >= len) this.endFrame();
     v.frameCompleted = 0;
     while (!v.frameCompleted) {
       if (cpu.halted && cpu.cpage[cpu.pc >> 14] === 0 && cpu.trapFlags[cpu.pc] === 0) {
@@ -518,8 +520,7 @@ export class Spectrum {
       const before = cpu.t;
       cpu.step();
       left -= cpu.t - before;
-      if (cpu.t >= this.frameLen) {
-        left -= 0;
+      while (cpu.t >= this.frameLen) {
         this.endFrame();
         this.serviceTyping();
       }

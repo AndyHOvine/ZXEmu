@@ -64,7 +64,7 @@ export class Z80 {
   // The /INT line is held now (for the debugger: an interrupt comes after this step)
   get intPending() {
     let t = this.t;
-    if (t >= this.frameLen) t -= this.frameLen;
+    if (t >= this.frameLen) t %= this.frameLen;
     return t < this.intLen ? 1 : 0;
   }
   set intPending(v) { /* the ULA drives /INT: nothing to set */ }
@@ -83,16 +83,23 @@ export class Z80 {
   get hl_() { return (this.h_ << 8) | this.l_; }
 
   // ---------------------------------------------------------------- timing
+  // the contention delay now: by the T-state within the frame, so stepping the CPU on its own
+  // past a frame's end (a debugger, a test timing code) keeps counting right
+  delay() {
+    const t = this.t;
+    return t < this.frameLen ? this.ctab[t] : this.ctab[t % this.frameLen];
+  }
+
   // one contended cycle of n T-states at addr (a memory access)
   cyc(addr, n) {
-    if (this.cpage[addr >> 14] !== 0) this.t += this.ctab[this.t];
+    if (this.cpage[addr >> 14] !== 0) this.t += this.delay();
     this.t += n;
   }
 
   // n cycles of 1 T-state with addr on the bus but no memory request
   nm(addr, n) {
     if (this.noMreqContended && this.cpage[addr >> 14] !== 0) {
-      for (let i = 0; i < n; i++) this.t += this.ctab[this.t] + 1;
+      for (let i = 0; i < n; i++) this.t += this.delay() + 1;
     } else {
       this.t += n;
     }
@@ -105,7 +112,7 @@ export class Z80 {
   // an opcode fetch (M1): 4 T-states
   fetchOp() {
     const pc = this.pc;
-    if (this.cpage[pc >> 14] !== 0) this.t += this.ctab[this.t];
+    if (this.cpage[pc >> 14] !== 0) this.t += this.delay();
     const op = this.bus.read(pc);
     this.t += 4;
     this.pc = (pc + 1) & 0xffff;
@@ -114,14 +121,14 @@ export class Z80 {
   }
 
   rm(addr) {
-    if (this.cpage[addr >> 14] !== 0) this.t += this.ctab[this.t];
+    if (this.cpage[addr >> 14] !== 0) this.t += this.delay();
     const v = this.bus.read(addr);
     this.t += 3;
     return v;
   }
 
   wm(addr, v) {
-    if (this.cpage[addr >> 14] !== 0) this.t += this.ctab[this.t];
+    if (this.cpage[addr >> 14] !== 0) this.t += this.delay();
     this.bus.write(addr, v);
     this.t += 3;
   }
@@ -170,15 +177,14 @@ export class Z80 {
   ioPre(port) {
     if (!this.ioContended) { this.t += 3; return; }
     const hi = this.cpage[port >> 14] !== 0;
-    const ctab = this.ctab;
     if (!(port & 1)) {
-      if (hi) this.t += ctab[this.t];
+      if (hi) this.t += this.delay();
       this.t += 1;
-      this.t += ctab[this.t];
+      this.t += this.delay();
       this.t += 2;
     } else if (hi) {
-      for (let i = 0; i < 3; i++) this.t += ctab[this.t] + 1;
-      this.t += ctab[this.t];
+      for (let i = 0; i < 3; i++) this.t += this.delay() + 1;
+      this.t += this.delay();
     } else {
       this.t += 3;
     }
@@ -195,7 +201,7 @@ export class Z80 {
       this.ldair = 0;
       if (this.halted) {
         // HALT: NOPs at the HALT until an interrupt
-        if (this.cpage[this.pc >> 14] !== 0) this.t += this.ctab[this.t];
+        if (this.cpage[this.pc >> 14] !== 0) this.t += this.delay();
         this.t += 4;
         this.incR();
       } else {
@@ -206,7 +212,7 @@ export class Z80 {
       this.eiDelay = 0;
     } else if (this.iff1 !== 0) {
       let t = this.t;
-      if (t >= this.frameLen) t -= this.frameLen;
+      if (t >= this.frameLen) t %= this.frameLen;
       if (t < this.intLen) this.interrupt();
     }
   }
