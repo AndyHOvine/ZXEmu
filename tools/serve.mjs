@@ -99,7 +99,7 @@ server.on('error', (e) => {
 server.on('listening', () => {
   const query = params.toString();
   const url = `http://localhost:${port}/${query ? '?' + query : ''}`;
-  console.log(`AmsEmu dev server: ${url}`);
+  console.log(`ZXEmu dev server: ${url}`);
   console.log(`Serving ${path.relative(projectRoot, root) || '.'}${gameFile ? ' and ' + gameFile : ''}. Press Ctrl+C to stop.`);
   if (flags.open) openBrowser(url);
 });

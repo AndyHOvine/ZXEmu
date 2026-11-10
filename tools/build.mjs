@@ -23,7 +23,7 @@ if (gameFile && !fs.existsSync(gameFile)) {
   console.error(`File not found: ${gameFile}`);
   process.exit(1);
 }
-const SETTINGS = ['model', 'ram', 'plussystem', 'title', 'joykeys', 'crt', 'filter', 'palette', 'border', 'autostart', 'run', 'load', 'exec', 'minimal', 'touchkeys', 'touchstick', 'touchfire', 'touchslide'];
+const SETTINGS = ['model', 'title', 'joykeys', 'joystick', 'flashload', 'stereo', 'crt', 'filter', 'palette', 'border', 'autostart', 'load', 'exec', 'minimal', 'touchkeys', 'touchstick', 'touchfire', 'touchslide'];
 const unknown = Object.keys(settings).filter((k) => !SETTINGS.includes(k));
 if (unknown.length) {
   console.error(`Unknown setting: ${unknown.join(', ')}. Settings are: ${SETTINGS.join(', ')}.`);
@@ -31,11 +31,20 @@ if (unknown.length) {
 }
 const list = (s) => (s.toLowerCase() === 'none' ? [] : s.split(',').map((k) => k.trim()).filter(Boolean));
 const STICK_DIRECTIONS = ['up', 'down', 'left', 'right'];
-const { CPC_KEYS } = await import('../web/js/emu/keys.js');
+const { isZxKey } = await import('../web/js/emu/keys.js');
+const { JOYSTICK_TYPES } = await import('../web/js/emu/spectrum.js');
+if (settings.joystick && !JOYSTICK_TYPES.includes(settings.joystick.toLowerCase())) {
+  console.error(`Unknown joystick: ${settings.joystick}. Use ${JOYSTICK_TYPES.join(', ')}.`);
+  process.exit(1);
+}
+if (settings.stereo && !['abc', 'acb', 'mono'].includes(settings.stereo.toLowerCase())) {
+  console.error(`Unknown stereo setting: ${settings.stereo}. Use abc, acb or mono.`);
+  process.exit(1);
+}
 if (settings.touchkeys) {
-  const bad = list(settings.touchkeys).map((k) => k.toUpperCase()).filter((k) => CPC_KEYS[k] === undefined);
+  const bad = list(settings.touchkeys).map((k) => k.toUpperCase()).filter((k) => !isZxKey(k));
   if (bad.length) {
-    console.error(`Unknown touch key: ${bad.join(', ')}. Use CPC key names such as F1, F2, SPACE, RETURN, Y, N, ESC, CURUP.`);
+    console.error(`Unknown touch key: ${bad.join(', ')}. Use Spectrum key names such as ENTER, SPACE, Y, N, 1, CAPS, SYMBOL, UP, BREAK.`);
     process.exit(1);
   }
 }
@@ -48,14 +57,14 @@ if (settings.touchstick) {
 }
 if (settings.touchfire) {
   const bad = list(settings.touchfire).map((b) => (b.indexOf(':', 1) < 0 ? b : b.slice(0, b.indexOf(':', 1))))
-    .filter((n) => !['fire', 'fire2', ...STICK_DIRECTIONS].includes(n.toLowerCase()) && CPC_KEYS[n.toUpperCase()] === undefined);
+    .filter((n) => !['fire', 'fire2', ...STICK_DIRECTIONS].includes(n.toLowerCase()) && !isZxKey(n.toUpperCase()));
   if (bad.length) {
-    console.error(`Unknown touch fire button: ${bad.join(', ')}. Use fire, fire2, up, down, left, right or a CPC key name, optionally with :label (up:JUMP).`);
+    console.error(`Unknown touch fire button: ${bad.join(', ')}. Use fire, fire2, up, down, left, right or a Spectrum key name, optionally with :label (up:JUMP).`);
     process.exit(1);
   }
 }
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-if (!name) name = gameFile ? slug(path.basename(gameFile, path.extname(gameFile))) || 'game' : 'amsemu';
+if (!name) name = gameFile ? slug(path.basename(gameFile, path.extname(gameFile))) || 'game' : 'zxemu';
 
 const bundledName = gameFile ? (slug(name) || 'game') + path.extname(gameFile).toLowerCase() : null;
 
@@ -67,9 +76,8 @@ function gameConfig() {
     game.media = settings.load ? { bin: { url, load: settings.load, exec: settings.exec || settings.load } } : { file: url };
   }
   if (settings.model) game.model = settings.model;
-  if (settings.plussystem) game.plusSystem = settings.plussystem;
-  if (settings.ram) game.ram = settings.ram === 'auto' ? 'auto' : Number(settings.ram);
-  if (settings.run) game.autostartFile = settings.run;
+  if (settings.flashload !== undefined) game.flashLoad = flag(settings.flashload);
+  if (settings.stereo) game.audio = { stereo: settings.stereo.toLowerCase() };
   if (settings.title || settings.minimal !== undefined || settings.touchkeys !== undefined ||
       settings.touchstick !== undefined || settings.touchfire !== undefined || settings.touchslide !== undefined) {
     game.ui = {};
@@ -80,7 +88,11 @@ function gameConfig() {
     if (settings.touchfire !== undefined) game.ui.touchFire = list(settings.touchfire);
     if (settings.touchslide !== undefined) game.ui.touchSlide = flag(settings.touchslide);
   }
-  if (settings.joykeys !== undefined) game.joystick = { keyboard: flag(settings.joykeys) };
+  if (settings.joykeys !== undefined || settings.joystick) {
+    game.joystick = {};
+    if (settings.joykeys !== undefined) game.joystick.keyboard = flag(settings.joykeys);
+    if (settings.joystick) game.joystick.type = settings.joystick.toLowerCase();
+  }
   if (settings.crt !== undefined || settings.palette || settings.filter !== undefined || settings.border) {
     game.video = {};
     if (settings.crt !== undefined) game.video.crt = flag(settings.crt);
@@ -141,7 +153,7 @@ if (gameFile) {
   }
 }
 
-const { MODELS, ROM_FILES, resolveModel, romsFor, autoModel } = await import('../web/js/emu/cpc.js');
+const { MODELS, ROM_FILES, resolveModel, romsFor, autoModel } = await import('../web/js/emu/spectrum.js');
 const { expand } = await import('../web/js/emu/media.js');
 const base = (await import(pathToFileURL(path.join(src, 'config.js')).href)).default;
 const game = gameConfig();
@@ -158,11 +170,11 @@ for (const entry of Object.values(config.media || {})) {
   }
   for (const it of await expand(path.basename(file), new Uint8Array(fs.readFileSync(file)))) {
     if (it.type === 'cart') found.cartridge = true;
+    if (it.type === 'tape') found.tape = true;
     if (it.type === 'disk') found.disk = true;
     if (it.type === 'snapshot') found.snapshot = it.data;
   }
 }
-const plusSystem = config.plusSystem === 'cartridge' ? 'cartridge' : 'cpc6128';
 let model;
 try {
   model = config.model && config.model !== 'auto' ? resolveModel(config.model) : autoModel(found);
@@ -170,21 +182,16 @@ try {
   console.error(e.message);
   process.exit(1);
 }
-if (found.cartridge && !MODELS[model].plus) model = '6128plus';
-const roms = new Set(romsFor(model, { plusSystem, cartridge: found.cartridge, disk: found.disk }));
-if (allRoms) {
-  for (const k of ['cpc464', 'cpc664', 'cpc6128', 'amsdos']) roms.add(k);
-  if (plusSystem === 'cartridge') roms.add('system');
-}
+if (found.cartridge && MODELS[model].paging !== '48') model = '48k';
+if (found.disk && !MODELS[model].fdc) model = 'plus3';
+const roms = new Set(found.cartridge ? [] : romsFor(model));
+if (allRoms) for (const k of Object.keys(ROM_FILES)) roms.add(k);
 for (const [key, file] of Object.entries(ROM_FILES)) {
   if (!roms.has(key)) fs.rmSync(path.join(outDir, 'roms', file), { force: true });
 }
 const missingRoms = [...roms].filter((k) => !fs.existsSync(path.join(outDir, 'roms', ROM_FILES[k])));
 if (missingRoms.length) {
   console.error(`Missing from web/roms/: ${missingRoms.map((k) => ROM_FILES[k]).join(', ')}`);
-  if (missingRoms.includes('system')) {
-    console.error('Copy system.cpr into web/roms/ yourself: see "A Plus without a cartridge" in README.md.');
-  }
   process.exit(1);
 }
 game.romsIncluded = [...roms];
@@ -272,7 +279,4 @@ fs.writeFileSync(zipFile, Buffer.concat([...locals, centralBuf, end]));
 const kb = (fs.statSync(zipFile).size / 1024).toFixed(0);
 console.log(`Built ${path.relative(projectRoot, outDir)}/ (${files.length} files)`);
 console.log(`ROMs for the ${MODELS[model].name}: ${[...roms].map((k) => ROM_FILES[k]).join(', ') || 'none (the cartridge is the whole program)'}`);
-if (roms.has('system')) {
-  console.log('  system.cpr is Amstrad\'s Plus cartridge, which also holds Ocean\'s Burnin\' Rubber.');
-}
 console.log(`itch.io package: ${path.relative(projectRoot, zipFile)} (${kb} KB)`);

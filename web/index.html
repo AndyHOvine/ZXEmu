@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ZXEmu ZX Spectrum</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/zxemu.css">
+  <style>
+    html, body { margin: 0; height: 100%; background: #0b0b0c; }
+    #zxemu { position: fixed; inset: 0; }
+    noscript { color: #ddd; font: 16px system-ui, sans-serif; display: block; padding: 2em; }
+  </style>
+</head>
+<body>
+  <div id="zxemu"></div>
+  <noscript>This ZX Spectrum emulator needs JavaScript.</noscript>
+  <script type="module">
+    import { ZXEmu } from './js/zxemu.js';
+    import config from './config.js';
+
+    ZXEmu.create(document.getElementById('zxemu'), config).then((zx) => {
+      window.zxemu = zx;
+    }).catch((e) => {
+      console.error(e);
+      document.getElementById('zxemu').textContent = 'Failed to start: ' + (e.message || e);
+    });
+  </script>
+</body>
+</html>
