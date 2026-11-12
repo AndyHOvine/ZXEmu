@@ -16,7 +16,7 @@ import { DskImage } from './dsk.js';
 
 export { FB_WIDTH, FB_HEIGHT };
 
-const STATE_VERSION = 1;
+export const STATE_VERSION = 1;
 
 // frame timings: T-states a frame and a line, the first T-state of the paper, where the
 // contention starts and its pattern of delays (per 8 T-states), how long /INT is held, the
@@ -25,6 +25,17 @@ const T48 = { frame: 69888, line: 224, paper: 14336, contStart: 14335, pattern: 
 const T128 = { frame: 70908, line: 228, paper: 14364, contStart: 14361, pattern: [6, 5, 4, 3, 2, 1, 0, 0], intLen: 36, clock: 3546900, floatAt: 14365, floating: true, noMreq: true, io: true };
 const TP3 = { frame: 70908, line: 228, paper: 14364, contStart: 14365, pattern: [1, 0, 7, 6, 5, 4, 3, 2], intLen: 32, clock: 3546900, floatAt: 0, floating: false, noMreq: false, io: false };
 
+// the Next's display timings, by Next register $03 bits 6-4 (the FPGA core's zxula_timing.vhd):
+// a 3.5 MHz clock (28 MHz / 8) in each; contention as the timing's machine (zxnext.vhd: 48K bank 5,
+// 128K the odd banks, +3 banks 4-7, the Pentagon none). No floating bus is modelled
+export const NEXT_TIMINGS = {
+  1: { ...T48, clock: 3500000, floatAt: 0, floating: false, contend: '48' },
+  2: { ...T128, clock: 3500000, floatAt: 0, floating: false, contend: '128' },
+  3: { ...TP3, clock: 3500000, contend: 'plus3' },
+  4: { frame: 71680, line: 224, paper: 17988, contStart: 0, pattern: [0, 0, 0, 0, 0, 0, 0, 0], intLen: 36, clock: 3500000, floatAt: 0, floating: false, noMreq: false, io: false, contend: 'none' },
+};
+const TNEXT = NEXT_TIMINGS[2];
+
 export const MODELS = {
   '16k': { name: 'ZX Spectrum 16K', rom: 'rom48', ram: 16, timing: T48, paging: '48', ay: false },
   '48k': { name: 'ZX Spectrum 48K', rom: 'rom48', ram: 48, timing: T48, paging: '48', ay: false },
@@ -32,13 +43,17 @@ export const MODELS = {
   plus2: { name: 'ZX Spectrum +2', rom: 'plus2', ram: 128, timing: T128, paging: '128', ay: true },
   plus2a: { name: 'ZX Spectrum +2A', rom: 'plus3', ram: 128, timing: TP3, paging: 'plus3', ay: true, fdc: false },
   plus3: { name: 'ZX Spectrum +3', rom: 'plus3', ram: 128, timing: TP3, paging: 'plus3', ay: true, fdc: true },
+  // the Next (next.js): RAM free to programs, 768K or 1792K, in 16K banks; the 128K ROM stands in
+  // for NextZXOS, which Hewco's programs don't need
+  next: { name: 'ZX Spectrum Next', rom: 'rom128', ram: 768, timing: TNEXT, paging: 'next', ay: true, next: true },
+  next2m: { name: 'ZX Spectrum Next (2 MB)', rom: 'rom128', ram: 1792, timing: TNEXT, paging: 'next', ay: true, next: true },
 };
 
 export const ROM_FILES = { rom48: '48.rom', rom128: '128.rom', plus2: 'plus2.rom', plus3: 'plus3.rom' };
 
 export function resolveModel(model) {
   const k = String(model || '48k').toLowerCase().replace(/\s|zx|spectrum|_|-/g, '').replace(/\+/g, 'plus');
-  const key = { 16: '16k', 48: '48k', 128: '128k', '128kplus2': 'plus2', plus2a: 'plus2a', plus3: 'plus3', plus2: 'plus2' }[k] || k;
+  const key = { 16: '16k', 48: '48k', 128: '128k', '128kplus2': 'plus2', plus2a: 'plus2a', plus3: 'plus3', plus2: 'plus2', next1m: 'next', next1mb: 'next', next2mb: 'next2m' }[k] || k;
   if (MODELS[key]) return key;
   throw new Error('Unknown Spectrum model: ' + model);
 }
@@ -71,7 +86,7 @@ const LD_BYTES = 0x0556, SA_BYTES = 0x04c2, LD_RET = 0x053f;
 const LD_SIG = [0x14, 0x08, 0x15, 0xf3];
 
 // frames to give the ROM to reach its prompt before the machine counts as ready
-const READY_FRAMES = { '16k': 60, '48k': 110, '128k': 90, plus2: 90, plus2a: 170, plus3: 170 };
+const READY_FRAMES = { '16k': 60, '48k': 110, '128k': 90, plus2: 90, plus2a: 170, plus3: 170, next: 90, next2m: 90 };
 
 export class Spectrum {
   constructor({ roms, model = '48k', sampleRate = 48000, joystick = 'kempston', joystick2 = 'none', flashLoad = true, cartridge = null, issue = 3 } = {}) {
@@ -160,15 +175,15 @@ export class Spectrum {
       if (b < 0) {
         this.pages[i] = this.romPages[Math.min(rom, this.romPages.length - 1)];
         this.readOnly[i] = 1;
-        this.cpu.cpage[i] = 0;
+        this.cpu.cpage[2 * i] = this.cpu.cpage[2 * i + 1] = 0;
       } else if (this.model === '16k' && i > 1) {
         this.pages[i] = this.nothing;
         this.readOnly[i] = 1;
-        this.cpu.cpage[i] = 0;
+        this.cpu.cpage[2 * i] = this.cpu.cpage[2 * i + 1] = 0;
       } else {
         this.pages[i] = this.banks[b];
         this.readOnly[i] = 0;
-        this.cpu.cpage[i] = contended(b) ? 1 : 0;
+        this.cpu.cpage[2 * i] = this.cpu.cpage[2 * i + 1] = contended(b) ? 1 : 0;
       }
     }
     const screen = info.paging !== '48' && (p & 8) ? 7 : 5;
@@ -490,13 +505,18 @@ export class Spectrum {
     while (cpu.t >= len) this.endFrame();
     v.frameCompleted = 0;
     while (!v.frameCompleted) {
-      if (cpu.halted && cpu.cpage[cpu.pc >> 14] === 0 && cpu.trapFlags[cpu.pc] === 0) {
+      if (cpu.halted && cpu.cpage[cpu.pc >> 13] === 0 && cpu.trapFlags[cpu.pc] === 0) {
         // HALT out of contended memory: nothing changes until the interrupt
         let t = cpu.t;
         const intEnd = cpu.iff1 ? cpu.intLen : 0;
         if (t >= intEnd && t < len) {
-          const n = Math.ceil((len - t) / 4);
-          cpu.t = t + n * 4;
+          // n NOPs of 4 T-states at the CPU's clock (the Next: mult times the ULA's, and a wait
+          // state on each fetch at 28 MHz)
+          const raw = 4 + cpu.rwait[cpu.pc >> 13], mult = cpu.mult;
+          const n = Math.ceil(((len - t) * mult - cpu.tRem) / raw);
+          const total = n * raw + cpu.tRem;
+          cpu.t = t + Math.floor(total / mult);
+          cpu.tRem = total % mult;
           cpu.r = (cpu.r & 0x80) | ((cpu.r + n) & 0x7f);
         } else {
           cpu.step();

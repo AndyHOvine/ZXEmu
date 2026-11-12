@@ -8,6 +8,10 @@
 
 import { CHAR_TO_KEYS } from '../emu/keys.js';
 import { JOY } from '../emu/spectrum.js';
+import { PAD } from '../emu/next.js';
+
+// a standard gamepad's buttons as the Next's Mega Drive pad
+const NEXT_PAD = [[2, PAD.A], [0, JOY.FIRE], [1, JOY.FIRE2], [3, PAD.Y], [4, PAD.X], [5, PAD.Z], [9, PAD.START], [8, PAD.MODE]];
 
 const SPECIAL = {
   Enter: ['ENTER'], NumpadEnter: ['ENTER'],
@@ -262,6 +266,12 @@ export class Input {
       if (ay > 0.4 || b(13)) bits |= JOY.DOWN;
       for (const [btn, key] of Object.entries(this.gamepadButtons)) {
         if (b(Number(btn))) keysDown.add(key);
+      }
+      if (this.machine && this.machine.info && this.machine.info.next) {
+        // the Next's Mega Drive pad: west A, south B (fire), east C (fire 2), north Y, the
+        // shoulders X and Z, start START, select MODE
+        for (const [i, bit] of NEXT_PAD) if (b(i) && !(String(i) in this.gamepadButtons)) bits |= bit;
+        continue;
       }
       for (const i of [0, 1, 2, 3, 4, 5, 6, 7]) {
         if (b(i) && !(String(i) in this.gamepadButtons)) bits |= i & 1 ? JOY.FIRE2 : JOY.FIRE;

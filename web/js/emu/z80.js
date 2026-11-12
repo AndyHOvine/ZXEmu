@@ -2,7 +2,8 @@
 //
 // Every machine cycle is counted in T-states, with the Spectrum's memory contention applied
 // to each access the way the ULA does it: the machine fills `ctab` (the delay at each T-state
-// of the frame) and `cpage` (which 16K pages are contended), and says whether the cycles
+// of the frame) and `cpage` (which 8K slots are contended), and `rwait` (the 8K slots whose reads take a wait state:
+// the Next at 28 MHz), and says whether the cycles
 // without a memory request are contended too (48K and 128K: yes; +2A and +3: no). Undocumented
 // opcodes and flags (X and Y, MEMPTR, Q for SCF and CCF, the block instructions' flags when
 // they repeat) are as on a Zilog NMOS Z80.
@@ -25,19 +26,35 @@ for (let i = 0; i < 256; i++) {
 
 const IM_MODES = [0, 0, 1, 2, 0, 0, 1, 2];
 
+const MIRROR = new Uint8Array(256); // the bits of a byte the other way round (Z80N MIRROR A)
+for (let i = 0; i < 256; i++) {
+  let m = 0;
+  for (let b = 0; b < 8; b++) if (i & (1 << b)) m |= 0x80 >> b;
+  MIRROR[i] = m;
+}
+
 export class Z80 {
   constructor(bus) {
     this.bus = bus;
     this.trapFlags = null; // a Uint8Array(65536): onTrap(pc) is asked before the instruction there
     this.onTrap = null; // true: the instruction is skipped
-    this.cpage = new Uint8Array(4); // contended 16K pages
+    this.cpage = new Uint8Array(8); // contended 8K slots
+    this.rwait = new Uint8Array(8); // extra T-states on each read from an 8K slot (the Next at 28 MHz)
     this.ctab = new Uint8Array(1); // contention delay by frame T-state (machine fills it)
     this.noMreqContended = true; // 48K/128K: the cycles without MREQ are contended too
     this.ioContended = true; // 48K/128K: I/O contention as the ULA does it
     this.frameLen = 69888;
-    this.intLen = 32; // T-states the /INT line is held at the start of a frame (0: never)
+    this.intLen = 32; // CPU cycles the /INT line is held at the start of a frame (0: never)
     this.t = 0; // T-states into the frame
     this.ints = 0; // interrupts taken (typing waits for the ROM to have seen keys)
+    this.z80n = false; // the Spectrum Next's extra instructions
+    // the Next's turbo: the CPU's clock is `mult` times the ULA's (1, 2, 4 or 8). `t` stays in
+    // the ULA's T-states, so each instruction counts 1/mult of its own; the rest carries over
+    this.mult = 1;
+    this.tRem = 0;
+    // the Next: its interrupt controller says whether /INT is held (besides the frame's own
+    // interrupt, intLen), and hears RETI
+    this.intHook = null;
     this.reset();
   }
 
@@ -65,7 +82,7 @@ export class Z80 {
   get intPending() {
     let t = this.t;
     if (t >= this.frameLen) t %= this.frameLen;
-    return t < this.intLen ? 1 : 0;
+    return t * this.mult + this.tRem < this.intLen || (this.intHook !== null && this.intHook()) ? 1 : 0;
   }
   set intPending(v) { /* the ULA drives /INT: nothing to set */ }
 
@@ -92,13 +109,13 @@ export class Z80 {
 
   // one contended cycle of n T-states at addr (a memory access)
   cyc(addr, n) {
-    if (this.cpage[addr >> 14] !== 0) this.t += this.delay();
+    if (this.cpage[addr >> 13] !== 0) this.t += this.delay();
     this.t += n;
   }
 
   // n cycles of 1 T-state with addr on the bus but no memory request
   nm(addr, n) {
-    if (this.noMreqContended && this.cpage[addr >> 14] !== 0) {
+    if (this.noMreqContended && this.cpage[addr >> 13] !== 0) {
       for (let i = 0; i < n; i++) this.t += this.delay() + 1;
     } else {
       this.t += n;
@@ -112,23 +129,23 @@ export class Z80 {
   // an opcode fetch (M1): 4 T-states
   fetchOp() {
     const pc = this.pc;
-    if (this.cpage[pc >> 14] !== 0) this.t += this.delay();
+    if (this.cpage[pc >> 13] !== 0) this.t += this.delay();
     const op = this.bus.read(pc);
-    this.t += 4;
+    this.t += 4 + this.rwait[pc >> 13];
     this.pc = (pc + 1) & 0xffff;
     this.incR();
     return op;
   }
 
   rm(addr) {
-    if (this.cpage[addr >> 14] !== 0) this.t += this.delay();
+    if (this.cpage[addr >> 13] !== 0) this.t += this.delay();
     const v = this.bus.read(addr);
-    this.t += 3;
+    this.t += 3 + this.rwait[addr >> 13];
     return v;
   }
 
   wm(addr, v) {
-    if (this.cpage[addr >> 14] !== 0) this.t += this.delay();
+    if (this.cpage[addr >> 13] !== 0) this.t += this.delay();
     this.bus.write(addr, v);
     this.t += 3;
   }
@@ -176,7 +193,7 @@ export class Z80 {
 
   ioPre(port) {
     if (!this.ioContended) { this.t += 3; return; }
-    const hi = this.cpage[port >> 14] !== 0;
+    const hi = this.cpage[port >> 13] !== 0;
     if (!(port & 1)) {
       if (hi) this.t += this.delay();
       this.t += 1;
@@ -193,6 +210,7 @@ export class Z80 {
   // ---------------------------------------------------------------- running
   step() {
     const tf = this.trapFlags;
+    const t0 = this.t;
     if (tf !== null && tf[this.pc] !== 0 && this.onTrap !== null && this.onTrap(this.pc)) {
       // skipped
     } else {
@@ -201,20 +219,34 @@ export class Z80 {
       this.ldair = 0;
       if (this.halted) {
         // HALT: NOPs at the HALT until an interrupt
-        if (this.cpage[this.pc >> 14] !== 0) this.t += this.delay();
-        this.t += 4;
+        if (this.cpage[this.pc >> 13] !== 0) this.t += this.delay();
+        this.t += 4 + this.rwait[this.pc >> 13];
         this.incR();
       } else {
         this.execMain(this.fetchOp());
       }
     }
+    if (this.mult !== 1) this.scaleTime(t0);
     if (this.eiDelay !== 0) {
       this.eiDelay = 0;
     } else if (this.iff1 !== 0) {
       let t = this.t;
       if (t >= this.frameLen) t %= this.frameLen;
-      if (t < this.intLen) this.interrupt();
+      // intLen is in CPU cycles: at a turbo speed, the cycles since the frame began are t * mult
+      // and the carried-over part
+      if (t * this.mult + this.tRem < this.intLen || (this.intHook !== null && this.intHook())) {
+        const t1 = this.t;
+        this.interrupt();
+        if (this.mult !== 1) this.scaleTime(t1);
+      }
     }
+  }
+
+  // the T-states since t0 at the turbo clock, counted in the ULA's
+  scaleTime(t0) {
+    const s = this.t - t0 + this.tRem;
+    this.t = t0 + Math.floor(s / this.mult);
+    this.tRem = s % this.mult;
   }
 
   interrupt() {
@@ -722,7 +754,11 @@ export class Z80 {
           return;
         }
         case 4: { const v = this.a; this.a = 0; this.sub8(v); return; }
-        case 5: this.iff1 = this.iff2; this.pc = this.wz = this.pop(); return;
+        case 5: // RETN, RETI (ED 4D, which the Next's interrupt controller watches for)
+          this.iff1 = this.iff2;
+          this.pc = this.wz = this.pop();
+          if (y === 1 && this.bus.reti) this.bus.reti();
+          return;
         case 6: this.im = IM_MODES[y]; return;
         default:
           switch (y) {
@@ -756,7 +792,123 @@ export class Z80 {
       this.block(op);
       return;
     }
+    if (this.z80n) this.execNext(op);
     // the rest are 8 T-state NOPs
+  }
+
+  // ---------------------------------------------------------------- Z80N
+  // The Spectrum Next's extra instructions (all ED-prefixed), on when `z80n` is set. Timings
+  // and operations from wiki.specnext.dev's "Extended Z80 instruction set". The bus takes
+  // NEXTREG through nextRegWrite(reg, v).
+  execNext(op) {
+    switch (op) {
+      case 0x23: this.a = ((this.a << 4) | (this.a >> 4)) & 0xff; return; // SWAPNIB
+      case 0x24: this.a = MIRROR[this.a]; return; // MIRROR A
+      case 0x27: { // TEST n: the flags of AND n, A kept
+        const r = this.a & this.fetch();
+        this.f = SZP[r] | HF;
+        this.qf = 1;
+        return;
+      }
+      case 0x28: this.de = (this.b & 31) > 15 ? 0 : (this.de << (this.b & 31)) & 0xffff; return; // BSLA DE,B
+      case 0x29: { // BSRA DE,B
+        const s = (this.de << 16) >> 16;
+        this.de = (s >> Math.min(this.b & 31, 16)) & 0xffff;
+        return;
+      }
+      case 0x2a: this.de = (this.b & 31) > 15 ? 0 : this.de >>> (this.b & 31); return; // BSRL DE,B
+      case 0x2b: this.de = ~((~this.de & 0xffff) >>> Math.min(this.b & 31, 16)) & 0xffff; return; // BSRF DE,B
+      case 0x2c: { // BRLC DE,B
+        const n = this.b & 15, de = this.de;
+        this.de = ((de << n) | (de >>> (16 - n))) & 0xffff;
+        return;
+      }
+      case 0x30: this.de = this.d * this.e; return; // MUL D,E
+      case 0x31: this.hl = (this.hl + this.a) & 0xffff; return; // ADD HL,A
+      case 0x32: this.de = (this.de + this.a) & 0xffff; return; // ADD DE,A
+      case 0x33: this.bc = (this.bc + this.a) & 0xffff; return; // ADD BC,A
+      case 0x34: case 0x35: case 0x36: { // ADD HL/DE/BC,nn
+        const n = this.fetch16();
+        this.t += 2;
+        if (op === 0x34) this.hl = (this.hl + n) & 0xffff;
+        else if (op === 0x35) this.de = (this.de + n) & 0xffff;
+        else this.bc = (this.bc + n) & 0xffff;
+        return;
+      }
+      case 0x8a: { // PUSH nn: the operand's high byte first
+        const hi = this.fetch(), lo = this.fetch();
+        this.t += 3;
+        this.push((hi << 8) | lo);
+        return;
+      }
+      case 0x90: { // OUTINB: OUTI without changing B
+        const hl = this.hl;
+        const v = this.rm(hl);
+        this.portOut(this.bc, v);
+        this.t += 1;
+        this.hl = (hl + 1) & 0xffff;
+        return;
+      }
+      case 0x91: { // NEXTREG n,n
+        const reg = this.fetch(), v = this.fetch();
+        this.t += 6;
+        if (this.bus.nextRegWrite) this.bus.nextRegWrite(reg, v);
+        return;
+      }
+      case 0x92: { // NEXTREG n,A
+        const reg = this.fetch();
+        this.t += 6;
+        if (this.bus.nextRegWrite) this.bus.nextRegWrite(reg, this.a);
+        return;
+      }
+      case 0x93: { // PIXELDN
+        const hl = this.hl;
+        if ((hl & 0x0700) !== 0x0700) this.hl = (hl + 0x100) & 0xffff;
+        else if ((hl & 0xe0) !== 0xe0) this.hl = ((hl & 0xf8ff) + 0x20) & 0xffff;
+        else this.hl = ((hl & 0xf81f) + 0x800) & 0xffff;
+        return;
+      }
+      case 0x94: { // PIXELAD: D = y, E = x
+        const d = this.d, e = this.e;
+        this.hl = 0x4000 + ((d & 0xc0) << 5) + ((d & 0x07) << 8) + ((d & 0x38) << 2) + (e >> 3);
+        return;
+      }
+      case 0x95: this.a = 0x80 >> (this.e & 7); return; // SETAE
+      case 0x98: { // JP (C): within the 16K the PC is in, from the byte read at port BC
+        const v = this.portIn(this.bc);
+        this.t += 1;
+        this.pc = this.wz = (this.pc & 0xc000) | (v << 6);
+        return;
+      }
+      case 0xa4: case 0xac: case 0xb4: case 0xbc: { // LDIX LDDX LDIRX LDDRX
+        const hl = this.hl, de = this.de;
+        const v = this.rm(hl);
+        if (v !== this.a) this.wm(de, v); else this.t += 3;
+        this.t += 2;
+        this.hl = (hl + (op & 8 ? -1 : 1)) & 0xffff;
+        this.de = (de + 1) & 0xffff;
+        this.bc = (this.bc - 1) & 0xffff;
+        if (op & 0x10 && this.bc) { this.t += 5; this.pc = (this.pc - 2) & 0xffff; }
+        return;
+      }
+      case 0xa5: { // LDWS: (DE) := (HL), INC L, INC D (the flags as INC D)
+        this.wm(this.de, this.rm(this.hl));
+        this.l = (this.l + 1) & 0xff;
+        this.d = this.inc8(this.d);
+        return;
+      }
+      case 0xb7: { // LDPIRX: from a pattern of 8 bytes at HL, the one E picks
+        const v = this.rm((this.hl & 0xfff8) | (this.e & 7));
+        const de = this.de;
+        if (v !== this.a) this.wm(de, v); else this.t += 3;
+        this.t += 2;
+        this.de = (de + 1) & 0xffff;
+        this.bc = (this.bc - 1) & 0xffff;
+        if (this.bc) { this.t += 5; this.pc = (this.pc - 2) & 0xffff; }
+        return;
+      }
+      default:
+    }
   }
 
   // LDI CPI INI OUTI, LDD ..., LDIR ..., LDDR ...

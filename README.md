@@ -22,6 +22,13 @@ code: it is a folder of static files.
 - Standard, vivid, black and white TV and green screen palettes
 - Keyboard joystick (switch with F9), gamepads, touch controls on phones
 - Save states: four save and load slots per game, kept in the player's browser
+- ZX Spectrum Next (1 MB or 2 MB), modelled on the Next's FPGA source: the Z80N's extra
+  instructions at 3.5, 7, 14 or 28 MHz (the 28 MHz wait state too), the MMU, Layer 2 (all
+  three modes), the tilemap, 128 hardware sprites, palettes, layer order and blending, the
+  copper, the DMA, line interrupts, hardware IM 2, the CTC, TurboSound (three AYs), the
+  DACs, Mega Drive pads and the Kempston mouse. `.nex` programs run straight away, with
+  their files on an SD card the page keeps in memory. No NextZXOS ROM is needed. Not checked
+  against a real Next yet
 
 ---
 
@@ -225,6 +232,25 @@ export default {
 ```
 
 The model comes from the snapshot unless you set `model`.
+
+### A Spectrum Next program
+
+```js
+export default {
+  media: {
+    nex: 'games/quest.nex',
+    sd: { 'LEVELS/ONE.BIN': 'games/levels/one.bin', 'TITLE.SCR': 'games/title.scr' },
+  },
+};
+```
+
+A `.nex` picks the Next by itself (the 2 MB one if the file asks for it) and starts at
+once, without NextZXOS. The `sd` files are on its SD card, where the program reads them
+through the esxDOS calls (`RST $08`); what it saves stays there until the page is closed,
+and the page's `sdchange` event tells you of each change. A ZIP with a `.nex` puts its
+other files on the card too. Double-click the screen to use the PC's mouse as the
+Kempston mouse (Esc lets go). A gamepad is a Mega Drive pad: the face buttons A, B, C and
+Y, the shoulders X and Z, Start and Select (MODE).
 
 ### A game with its own keys and joystick
 

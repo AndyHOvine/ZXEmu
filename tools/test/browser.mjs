@@ -34,6 +34,8 @@ const program = makeProgram();
 const server = http.createServer((req, res) => {
   const url = decodeURIComponent(req.url.split('?')[0]);
   if (url === '/test.tap') { res.writeHead(200, { 'Content-Type': 'application/octet-stream' }).end(program); return; }
+  if (url === '/test.nex') { res.writeHead(200, { 'Content-Type': 'application/octet-stream' }).end(makeNex()); return; }
+  if (url === '/DATA.BIN') { res.writeHead(200, { 'Content-Type': 'application/octet-stream' }).end(Buffer.from([0x1c])); return; }
   const file = path.join(root, 'web', url === '/' ? 'index.html' : url);
   fs.readFile(file, (err, data) => {
     if (err) { res.writeHead(404).end(); return; }
@@ -56,6 +58,26 @@ function makeProgram() {
     return [all.length & 0xff, all.length >> 8, ...all];
   };
   return Buffer.from([...block(header), ...block([0xff, ...body])]);
+}
+
+// a .nex for the Next: 28 MHz, reads DATA.BIN's byte from the SD card, fills the first third of
+// Layer 2 with it (writing and reading through port $123B's mapping) and shows Layer 2
+function makeNex() {
+  const code = [
+    0xf3, 0xed, 0x91, 0x07, 0x03, // di; nextreg 7,3
+    0x3e, 0x2a, 0xdd, 0x21, 0x00, 0x81, 0x06, 0x01, 0xcf, 0x9a, // F_OPEN DATA.BIN
+    0xdd, 0x21, 0x00, 0x90, 0x01, 0x01, 0x00, 0xcf, 0x9d, // F_READ 1 byte to $9000
+    0x01, 0x3b, 0x12, 0x3e, 0x07, 0xed, 0x79, // out ($123B),7
+    0x3a, 0x00, 0x90, 0x21, 0x00, 0x00, 0x77, 0x11, 0x01, 0x00, 0x01, 0xff, 0x3f, 0xed, 0xb0, // fill $0000-$3FFF
+    0x18, 0xfe,
+  ];
+  const head = Buffer.alloc(512);
+  head.write('NextV1.2', 0, 'ascii');
+  head[9] = 1; head[10] = 0x80; head[12] = 0xf0; head[13] = 0xbf; head[15] = 0x80; head[18 + 2] = 1;
+  const bank = Buffer.alloc(0x4000);
+  Buffer.from(code).copy(bank, 0);
+  bank.write('DATA.BIN\0', 0x100, 'ascii');
+  return Buffer.concat([head, bank]);
 }
 
 // ---- the browser and a minimal DevTools websocket client
@@ -182,6 +204,23 @@ try {
   // a .z80 snapshot of the machine
   const snap = await p.eval('window.zxemu.snapshot().length');
   check('snapshot made', snap > 1000, String(snap));
+  // the Next: a .nex with a file for its SD card, through the page's own loading
+  const next = await p.eval(`(async () => {
+    const z = window.zxemu;
+    const get = async (u) => new Uint8Array(await (await fetch(u)).arrayBuffer());
+    z.media = { disk: null, diskB: null, tape: null, snapshot: null, cart: null, bin: null, nex: null, sd: null };
+    await z.addFile('DATA.BIN', await get('/DATA.BIN'), 'file');
+    await z.addFile('test.nex', await get('/test.nex'));
+    await z.boot();
+    await new Promise((r) => setTimeout(r, 1000));
+    const m = z.machine, { NEXT_RGBA } = await import('./js/emu/nextvideo.js');
+    return { model: z.model, speed: m.speed, l2: m.l2Display, px: m.video.fb[48 * 704 + 96], want: NEXT_RGBA[0x38], frames: m.frames };
+  })()`);
+  check('the Next model for a .nex', next.model === 'next', JSON.stringify(next));
+  check('the .nex ran at 28 MHz with Layer 2 on', next.speed === 3 && next.l2 === true, JSON.stringify(next));
+  check('the SD card file\'s byte drawn by Layer 2', next.px === next.want, JSON.stringify(next));
+  const shot2 = await p.call('Page.captureScreenshot', { format: 'png' });
+  fs.writeFileSync(path.join(os.tmpdir(), 'zxemu-browser-next.png'), Buffer.from(shot2.result.data, 'base64'));
   const errors = p.events.filter((e) => e.method === 'Runtime.exceptionThrown' || (e.method === 'Runtime.consoleAPICalled' && e.params.type === 'error'));
   check('no script errors', !errors.length, JSON.stringify(errors.map((e) => e.params.exceptionDetails?.exception?.description || e.params.args?.map((a) => a.value || a.description).join(' '))).slice(0, 500));
 } catch (e) {
