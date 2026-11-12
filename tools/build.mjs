@@ -173,11 +173,12 @@ for (const entry of Object.values(config.media || {})) {
     if (it.type === 'tape') found.tape = true;
     if (it.type === 'disk') found.disk = true;
     if (it.type === 'snapshot') found.snapshot = it.data;
+    if (it.type === 'nex') found.nex = it.data;
   }
 }
 let model;
 try {
-  model = config.model && config.model !== 'auto' ? resolveModel(config.model) : autoModel(found);
+  model = config.model && config.model !== 'auto' ? resolveModel(config.model) : found.nex ? (found.nex[8] === 1 ? 'next2m' : 'next') : autoModel(found);
 } catch (e) {
   console.error(e.message);
   process.exit(1);

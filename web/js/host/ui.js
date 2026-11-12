@@ -129,7 +129,7 @@ export function createUi(app, container) {
 
   container.append(screen);
 
-  const fileInput = el('input', { type: 'file', accept: '.tap,.tzx,.csw,.wav,.z80,.sna,.dsk,.rom,.bin,.scr,.zip', hidden: '' });
+  const fileInput = el('input', { type: 'file', accept: '.tap,.tzx,.csw,.wav,.z80,.sna,.dsk,.rom,.bin,.scr,.nex,.zip', hidden: '' });
   const btn = (name, title, onclick) => {
     const b = el('button', { class: 'zx-btn', type: 'button', title, 'aria-label': title, onclick }, icon(name));
     return b;
@@ -442,7 +442,7 @@ export function createUi(app, container) {
     if (m && m.disks[0]) {
       media.append(action('Download disk image', () => download(app.diskImage(), (app.mediaNames && app.mediaNames.disk) || 'disk.dsk')));
     }
-    if (m) media.append(action('Save snapshot (.z80)', () => download(app.snapshot(), 'snapshot.z80')));
+    if (m && !app.machine.info.next) media.append(action('Save snapshot (.z80)', () => download(app.snapshot(), 'snapshot.z80')));
     if (o.allowFileDrop) media.append(action('Load file…', pickFile));
     media.append(action('Unload (start in BASIC)', () => app.unload()));
   }

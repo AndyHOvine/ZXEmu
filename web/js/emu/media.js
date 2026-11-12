@@ -21,10 +21,12 @@ export function isZip(bytes) {
   return bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
 }
 
-// tape, snapshot, disk, cart (Interface 2), bin (bytes to put in memory), or null
+// tape, snapshot, disk, cart (Interface 2), bin (bytes to put in memory), nex (a Spectrum Next
+// program), or null
 export function detectType(name, bytes) {
   const e = ext(name);
   if (isZip(bytes)) return 'zip';
+  if (e === 'nex' || (bytes.length >= 512 && ascii(bytes, 0, 4) === 'Next')) return 'nex';
   if (isDsk(bytes)) return 'disk';
   if (isTapeFile(bytes)) return 'tape';
   if (e === 'tap' || (e !== 'bin' && e !== 'rom' && e !== 'scr' && isTap(bytes))) return 'tape';
@@ -109,7 +111,8 @@ async function item(name, type, data) {
   return { name, type, data: type === 'tape' ? await cswToRle(data) : data };
 }
 
-// the files in a file (a ZIP's, or itself), with their types
+// the files in a file (a ZIP's, or itself), with their types; a ZIP's other files are 'file'
+// (the Next's SD card takes them)
 export async function expand(name, bytes) {
   const type = detectType(name, bytes);
   if (type !== 'zip') return type ? [await item(name, type, bytes)] : [];
@@ -117,6 +120,7 @@ export async function expand(name, bytes) {
   for (const f of await unzip(bytes)) {
     const t = detectType(f.name, f.data);
     if (t && t !== 'zip') out.push(await item(f.name, t, f.data));
+    else if (!t) out.push({ name: f.name, type: 'file', data: f.data });
   }
   return out;
 }

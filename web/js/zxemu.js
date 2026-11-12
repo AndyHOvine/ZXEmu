@@ -1,6 +1,7 @@
 // ZXEmu: a ZX Spectrum in the web page (from AmsEmu's page, by HEWCO).
 // GPL v2 or later, see LICENSE.
 
+import { createMachine, SpectrumNext } from './emu/next.js';
 import { Spectrum, MODELS, ROM_FILES, resolveModel, romsFor, autoModel, FB_WIDTH, FB_HEIGHT, JOYSTICK_TYPES } from './emu/spectrum.js';
 import { DskImage } from './emu/dsk.js';
 import { expand, parseBinary } from './emu/media.js';
@@ -46,7 +47,7 @@ const PREF_KEYS = ['crt', 'filter', 'joyKeyMap', 'palette', 'border', 'aspect', 
 const SHARED_PREF_KEYS = ['crt', 'filter', 'palette', 'border', 'aspect', 'integerScale', 'volume', 'muted', 'stereo', 'joyKeys', 'keyboardMap'];
 const SHARED_PREFS_KEY = 'zxemu:shared';
 
-const NO_MEDIA = () => ({ disk: null, diskB: null, tape: null, snapshot: null, cart: null, bin: null });
+const NO_MEDIA = () => ({ disk: null, diskB: null, tape: null, snapshot: null, cart: null, bin: null, nex: null, sd: null });
 
 function merge(base, over) {
   const out = Array.isArray(base) ? base.slice() : { ...base };
@@ -94,7 +95,7 @@ function urlOptions() {
   const p = new URLSearchParams(location.search);
   const o = {};
   const media = {};
-  for (const k of ['disk', 'tape', 'snapshot', 'cart', 'bin', 'file']) if (p.has(k)) media[k] = p.get(k);
+  for (const k of ['disk', 'tape', 'snapshot', 'cart', 'bin', 'file', 'nex']) if (p.has(k)) media[k] = p.get(k);
   if (Object.keys(media).length) o.media = media;
   if (p.has('model')) o.model = p.get('model');
   if (p.has('load')) o.load = p.get('load');
@@ -236,6 +237,7 @@ export class ZXEmu {
 
     this.input.attach(window);
     this.ui.attachInput();
+    this.attachMouse(this.ui.canvas);
     this.ui.resize();
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) this.audio.suspend(); else { this.audio.resume(); this.lastTime = 0; }
@@ -245,6 +247,20 @@ export class ZXEmu {
     else this.ui.showStart();
     this.loop = this.loop.bind(this);
     requestAnimationFrame(this.loop);
+  }
+
+  // the Next's Kempston mouse: a double-click on the screen captures the PC's mouse (Esc lets go)
+  attachMouse(canvas) {
+    const next = () => this.machine && this.machine.info.next;
+    const locked = () => document.pointerLockElement === canvas;
+    const bit = (b) => (b === 0 ? 1 : b === 2 ? 2 : b === 1 ? 4 : 0);
+    let buttons = 0;
+    canvas.addEventListener('dblclick', () => { if (next() && !locked() && canvas.requestPointerLock) canvas.requestPointerLock(); });
+    document.addEventListener('mousemove', (e) => { if (next() && locked()) this.machine.mouseMove(e.movementX / 2, e.movementY / 2); });
+    document.addEventListener('mousedown', (e) => { if (next() && locked()) { buttons |= bit(e.button); this.machine.setMouseButtons(buttons); } });
+    document.addEventListener('mouseup', (e) => { if (next()) { buttons &= ~bit(e.button); this.machine.setMouseButtons(buttons); } });
+    document.addEventListener('wheel', (e) => { if (next() && locked()) this.machine.mouseWheel(e.deltaY > 0 ? -1 : 1); }, { passive: true });
+    document.addEventListener('pointerlockchange', () => { if (!locked()) { buttons = 0; if (next()) this.machine.setMouseButtons(0); } });
   }
 
   setupHotkeys() {
@@ -271,10 +287,12 @@ export class ZXEmu {
     const m = this.opts.media || {};
     const spec = (v) => (typeof v === 'string' ? { url: v } : v);
     if (m.file) await this.addFile(fileName(m.file), await fetchBytes(m.file));
-    for (const t of ['disk', 'tape', 'snapshot', 'cart']) {
+    for (const t of ['disk', 'tape', 'snapshot', 'cart', 'nex']) {
       if (m[t]) await this.addFile(fileName(spec(m[t]).url), await fetchBytes(spec(m[t]).url), t);
     }
     if (m.diskB) await this.addFile(fileName(m.diskB), await fetchBytes(m.diskB), 'diskB');
+    // files for the Next's SD card: { 'LEVELS/ONE.BIN': url, ... }
+    if (m.sd) for (const [path, url] of Object.entries(m.sd)) await this.addFile(path, await fetchBytes(url), 'file');
     if (m.bin) {
       const b = spec(m.bin);
       await this.addFile(fileName(b.url), await fetchBytes(b.url), 'bin', b);
@@ -294,6 +312,11 @@ export class ZXEmu {
       if (type === 'dsk') type = 'disk';
       if (type === 'rom') type = 'cart';
       if (type === 'diskB' && it.type !== 'disk') type = it.type;
+      if (type === 'file') { // a file for the Next's SD card
+        this.media.sd = this.media.sd || {};
+        this.media.sd['/' + it.name.replace(/^\/+/, '')] = it.data;
+        continue;
+      }
       const id = fingerprint(it.data);
       let item;
       if (type === 'disk' || type === 'diskB') item = DskImage.parse(it.data);
@@ -329,6 +352,7 @@ export class ZXEmu {
     const want = this.modelOverride || this.opts.model;
     let model = want && want !== 'auto' ? resolveModel(want)
       : autoModel({ snapshot: this.media.snapshot, disk: !!(this.media.disk || this.media.diskB) });
+    if (this.media.nex) model = this.media.nex[8] === 1 ? 'next2m' : MODELS[model].next ? model : 'next';
     if (this.media.cart && MODELS[model].paging !== '48') model = '48k';
     if ((this.media.disk || this.media.diskB) && !MODELS[model].fdc) model = 'plus3';
     return model;
@@ -352,10 +376,18 @@ export class ZXEmu {
   }
 
   newMachine(model) {
-    const m = new Spectrum({
+    const m = createMachine({
       roms: this.roms, model, sampleRate: this.audio.sampleRate, joystick: this.joystickType,
-      flashLoad: this.flashLoad, cartridge: this.media.cart || null,
+      flashLoad: this.flashLoad, cartridge: this.media.cart || null, sd: this.media.sd || {},
     });
+    if (m instanceof SpectrumNext) {
+      // what a program saves stays on the card for the next reset, and the host is told
+      m.sd.onChange = (path, data) => {
+        this.media.sd = this.media.sd || {};
+        if (data) this.media.sd[path] = data; else delete this.media.sd[path];
+        this.emit('sdchange', path, data);
+      };
+    }
     m.psg.stereo = this.stereo;
     return m;
   }
@@ -382,7 +414,13 @@ export class ZXEmu {
     this.audio.clear();
     this.lastTime = 0;
     this.acc = 0;
-    if (media.snapshot) {
+    if (media.nex) {
+      try {
+        m.loadNex(media.nex, (this.mediaNames && this.mediaNames.nex) || 'program.nex');
+      } catch (e) {
+        this.ui.message(String(e.message || e), 6000);
+      }
+    } else if (media.snapshot) {
       try {
         m.loadSnapshot(media.snapshot);
       } catch (e) {
@@ -516,7 +554,7 @@ export class ZXEmu {
 
   gameId() {
     const m = this.media;
-    const ids = [m.disk, m.diskB, m.tape, m.snapshot, m.cart, m.bin].filter(Boolean).map((x) => this.mediaIds.get(x) || 'x');
+    const ids = [m.disk, m.diskB, m.tape, m.snapshot, m.cart, m.bin, m.nex].filter(Boolean).map((x) => this.mediaIds.get(x) || 'x');
     return ids.length ? ids.join('+') : 'basic';
   }
 
